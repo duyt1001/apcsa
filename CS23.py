@@ -182,7 +182,7 @@ def blindMessage(m, n, e):
     # Generate blind factor
     r = randrange(n)
 
-    # Get the blinded message with r^e * m mod n
+    # Get the blinded message = r^e * m mod n
     mb = (ModPow(r, e, n) * m) % n
     return mb, r
 
@@ -300,6 +300,10 @@ class Bank:
         m1 = ModPow(s, self.e, self.n)
         return m == m1
 
+    # Return unblinded signature, this is only for chunk verification
+    def unblindSignature(self, s, r):
+        return (ModularInverse(r, self.n) * s) % self.n
+
     # function to set a new k value if needed
     def setK(self, k):
         self.k = k
@@ -308,12 +312,88 @@ class Bank:
     def setK1(self, k1):
         self.k1 = k1
 
+    # Verify 1 chunk: get unblinded f from a,c,d, unblinded signature from r and fb, verify they match
+    def verify1Chunk(self, fb, r, a, c, d, I):
+        aXorI = a ^ I
+        x = int(g(a, c), 16)
+        y = int(g(aXorI, d), 16)
+        fi = int(f(x, y), 16)   # original hash
+
+        sb = self.createSignature(fb) # signature from blinded f
+        si = self.unblindSignature(sb, r)   # signature from unblinded f
+
+        return self.verifySignature(fi, si)
+
+    # check the chunks of a bill
+    # Return false if any chunk doesn't match
+    def verifyAndSignChunks(self, customerNum, bank_verify_file='bank_verify.txt', tosign='to_sign.txt'):
+        thebill = self.nextBillNumber - 1 # because it's already incremented
+        theI = int(f"{customerNum:05d}{thebill:05d}")
+
+        # read the k1 unblind factors and etc
+        k1chunks = []
+        with open(bank_verify_file) as f:
+            for line in f:
+                r, a, c, d = line.strip().split()
+                r = int(r)
+                a = int(a)
+                c = int(c)
+                d = int(d)
+                print(r, a, c, d)
+                k1chunks.append({'r': r, 'a': a, 'c': c, 'd': d})
+
+        # read to_sign into allchunks_fb, which is one value of blinded f (fb) per line
+        allchunks_fb = []
+        with open(tosign) as f:
+            for line in f:
+                allchunks_fb.append(int(line.strip()))
+
+        # Then match them with the original chunks 
+        j = 0
+        for i in range(len(self.unblindIt)):
+            if self.unblindIt[i] == False:  # don't need k chunks
+                continue
+            chunk = k1chunks[j]
+            if self.verify1Chunk(allchunks_fb[i], chunk['r'], chunk['a'], chunk['c'], chunk['d'], theI) == False:
+                return False
+            j += 1
+
+        # verified, sign the k chunks and save to signed.txt
+        signedfile = open('signed.txt', 'w')
+        for i in range(len(self.unblindIt)):
+            if self.unblindIt[i] == True:   # don't need k1 chunks
+                continue
+            sb = self.createSignature(allchunks_fb[i])
+            print(sb, file=signedfile)
+        signedfile.close()
+
+        print(f"Bank: bill {thebill} successfully verified {self.k1} chunks")
+        return True
+
+                
+
+
     # Customer request to sign a bill
     # chunks include k+k1 chunks
     # randomly get k1 chunks to unblind
     # then sign
     def signBill(self, customer, to_sign_file):
         pass
+
+    # return a list of k+k1 where k1 chunks are to be unblinded
+    def requestK1Unblind(self):
+        # randomly pick k1 
+        unblindIt = [False] * (self.k+self.k1)
+        more = self.k1 # need more to unblind
+        while more > 0:
+            i = randrange(self.k + self.k1)
+            if unblindIt[i] == False:
+                unblindIt[i] = True
+                more -= 1
+        # print(unblindIt)
+        self.unblindIt = unblindIt  # save for next step verification
+        return unblindIt
+
 
 
 
@@ -327,15 +407,45 @@ class Customer:
 
     def generateBill(self):
         billn = self.bank.createBill()
-        chunks = []
+        # prepare for k+k1 chunks for bank to check and sign
+        unsigned_chunks = []
+        tosign = open('to_sign.txt', 'w')
         for i in range(self.bank.k + self.bank.k1):
             chunk = self.prepareChunk(billn)
-            chunks.append(chunk)
-        self.bills.append((billn, chunks))
-        print(f"Bill {self.bills[-1]} is generated")
+            unsigned_chunks.append(chunk)
+            # write blinded f to file to_sign.txt
+            print(chunk['fb'], file=tosign)
+        tosign.close()
+
+        # Send to bank to request k1 chunks to be unblind
+        unblindIt = self.bank.requestK1Unblind()
+
+        # write the k1 chunks to file bank_verify.txt
+        bank_verify = open('bank_verify.txt', 'w')
+        for i in range(len(unblindIt)):
+            if unblindIt[i] == True:
+                chunk = unsigned_chunks[i]
+                print(chunk['r'], chunk['a'], chunk['c'], chunk['d'], file=bank_verify)
+        bank_verify.close()
+
+        # call bank to verify k1 chunks
+        valid = self.bank.verifyAndSignChunks(self.acctNum, 'bank_verify.txt')
+        if valid:
+            # delete k1 chunks
+            for i in range(len(unblindIt)):
+                j = len(unblindIt) - i - 1  # reverse order
+                if unblindIt[j] == True:
+                    del unsigned_chunks[j]
+            assert len(unsigned_chunks) == self.bank.k
+        else:
+            print(f"Customer: the bill {billn} didn't pass the bank verification")
+
+        # 
+        self.bills.append({billn: unsigned_chunks})
+        print(f"Bill {billn} is generated")
 
     # Prepare a chunk for the bill
-    # return (a, aXorI, c, d, x, y, fi)
+    # return (a, aXorI, c, d, x, y, fi) as dict
     def prepareChunk(self, billNum):
         I = int(f"{self.acctNum:05d}{billNum:05d}")
         a = randrange(0, 0xffffffff)
@@ -344,8 +454,41 @@ class Customer:
         aXorI = a ^ I
         x = int(g(a, c), 16)
         y = int(g(aXorI, d), 16)
-        fi = int(f(x, y), 16)
-        return (a, aXorI, c, d, x, y, fi)
+        fi = int(f(x, y), 16)   # original hash
+        # fb is blinded f, and r is the blinding factor
+        fb, r = blindMessage(fi, self.bank.n, self.bank.e)
+        return {
+            'a': a,
+            'aXorI': aXorI,
+            'c': c,
+            'd': d,
+            'x': x,
+            'y': y,
+            'fi': fi,
+            'fb': fb,
+            'r': r
+        }
+
+    def sendBillToMerchant(self, merchant):
+        reveal = merchant.whichChunksToReveal()
+
+
+class Merchant:
+    def __init__(self, bank) -> None:
+        self.bank = bank
+        self.acctNum = bank.createAccount()
+        self.bills = []
+        self.reveal = ''
+        print(f"Merchant {self.acctNum} is created")
+
+    def whichChunksToReveal(self):
+        reveal = ''
+        for i in range(self.bank.k):
+            reveal = f"{reveal}{randrange(2)}"
+        self.reveal = reveal
+        print('Merchant: reveal {reveal}')
+        return reveal
+
 
 
 def test_signature(bank):
@@ -359,6 +502,8 @@ def Problem6Part6():
     # test_signature(bank)
     alice = Customer(bank)
     alice.generateBill()
+    bob = Merchant(bank)
+    alice.sendBillToMerchant(bob)
 
 if __name__ == '__main__':
     Problem1Part6()
