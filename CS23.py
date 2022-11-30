@@ -441,7 +441,7 @@ class Customer:
             print(f"Customer: the bill {billn} didn't pass the bank verification")
 
         # 
-        self.bills.append({billn: unsigned_chunks})
+        self.bills.append({"billn": billn, 'chunks': unsigned_chunks})
         print(f"Bill {billn} is generated")
 
     # Prepare a chunk for the bill
@@ -471,7 +471,20 @@ class Customer:
 
     def sendBillToMerchant(self, merchant):
         reveal = merchant.whichChunksToReveal()
+        bill = self.bills[0]
 
+        # write to merch_verify.txt
+        merch_verify = open('merch_verify.txt', 'w')
+        for i in range(self.bank.k):
+            chunki = bill['chunks'][i]
+            if reveal[i] == '1':
+                print('1', chunki['a'], chunki['c'], chunki['y'], file=merch_verify)
+            elif reveal[i] == '0':
+                print('0', chunki['aXorI'], chunki['d'], chunki['x'], file=merch_verify)
+        merch_verify.close()
+
+        # inform merchant to proceed
+        merchant.verify('merch_verify.txt')
 
 class Merchant:
     def __init__(self, bank) -> None:
@@ -486,8 +499,31 @@ class Merchant:
         for i in range(self.bank.k):
             reveal = f"{reveal}{randrange(2)}"
         self.reveal = reveal
-        print('Merchant: reveal {reveal}')
+        print(f'Merchant: reveal {reveal}')
         return reveal
+
+    def verify(self, merch_verify='merch_verify.txt', signed='signed.txt'):
+        # read the merch_verify info
+        verify_info = []
+        with open(merch_verify) as f:
+            for line in f:
+                # revealbit, a_or_a1, c_or_d, y_or_x = line.strip().split()
+                # a_or_a1 = int(a_or_a1)
+                # c_or_d = int(c_or_d)
+                # y_or_x = int(y_or_x)
+                verify_info.append(line.strip().split())
+        assert len(verify_info) == self.bank.k
+        
+        # read the signed.txt
+        signatures = []
+        with open(signed) as f:
+            for line in f:
+                signatures.append(int(line.strip()))
+        assert len(signatures) == self.bank.k
+
+        # for i in range(self.bank.k):
+
+
 
 
 
