@@ -273,7 +273,10 @@ class Bank:
 
         self.nextAccountNumber = 10000
         self.nextBillNumber = 10000
-        self.accounts = []
+        self.accounts = []  # keeps all account numbers of customers and merchants
+        # bills keeps all the bills and the owner, it stores in the format of
+        #   {'account': account, 'signature': signatures}
+        self.bills = [] 
 
     # Create an account with 5-digit id, and save to accounts list
     def createAccount(self):
@@ -339,7 +342,7 @@ class Bank:
                 a = int(a)
                 c = int(c)
                 d = int(d)
-                print(r, a, c, d)
+                # print(r, a, c, d)
                 k1chunks.append({'r': r, 'a': a, 'c': c, 'd': d})
 
         # read to_sign into allchunks_fb, which is one value of blinded f (fb) per line
@@ -360,17 +363,42 @@ class Bank:
 
         # verified, sign the k chunks and save to signed.txt
         signedfile = open('signed.txt', 'w')
+        sbs = []
         for i in range(len(self.unblindIt)):
             if self.unblindIt[i] == True:   # don't need k1 chunks
                 continue
             sb = self.createSignature(allchunks_fb[i])
+            sbs.append(sb)
             print(sb, file=signedfile)
         signedfile.close()
+
+        # save the bill with customer
+        self.bills.append({'account': customerNum, 'signatures': sbs})
 
         print(f"Bank: bill {thebill} successfully verified {self.k1} chunks")
         return True
 
-                
+    # Verify each chunk based on the reveal bit, which is first char in chunkinfo
+    def reveal1chunk(self, chunkinfo, sig):
+        if chunkinfo[0] == '1':
+            a = int(chunkinfo[1])
+            c = int(chunkinfo[2])
+            y = int(chunkinfo[3])
+            r = int(chunkinfo[4])
+            x = int(g(a, c), 16)
+            fi = int(f(x, y), 16)
+            fb = (ModPow(r, self.e, self.n) * fi) % self.n
+            return self.verifySignature(fb, sig)
+        elif chunkinfo[0] == '0':
+            aXorI = int(chunkinfo[1])
+            d = int(chunkinfo[2])
+            x = int(chunkinfo[3])
+            r = int(chunkinfo[4])
+            y = int(g(aXorI, d), 16)
+            fi = int(f(x, y), 16)
+            fb = (ModPow(r, self.e, self.n) * fi) % self.n
+            return self.verifySignature(fb, sig)
+
 
 
     # Customer request to sign a bill
@@ -394,8 +422,69 @@ class Bank:
         self.unblindIt = unblindIt  # save for next step verification
         return unblindIt
 
+    def compareSignatures(self, sigs1, sigs2):
+        if len(sigs1) != len(sigs2):
+            return False
+        for i in range(len(sigs1)):
+            if sigs1[i] != sigs2[i]:
+                return False
+        return True
+
+    # Verify the merchant's information and save the deposit
+    def depositMerchant(self, merchNum, depositfile='deposit.txt'):
+        print(f'Bank: Verify the deposit.txt from Merchant {merchNum}')
+        # read the depositfile
+        chunkinfos = []
+        sigs = []
+        with open(depositfile) as f:
+            for line in f:
+                items = line.strip().split()
+                chunkinfos.append(items[:-1])
+                sigs.append(int(items[-1]))
+
+        # Verify all the chunks
+        for i in range(len(chunkinfos)):
+            self.reveal1chunk(chunkinfos[i], sigs[i])
+
+        # search for the same signatures to find the bill
+        for bill in self.bills:
+            if self.compareSignatures(sigs, bill['signatures']):
+                break
+        else:
+            print(f'Bank: Unable to find this bill {bill} \nin {self.bills}')
+            return False
+
+        # Found the bill, check double-spending
+        double_spending, offenderI = self.checkDoubleSpending(bill,chunkinfos)
+        if double_spending:
+            offender = str(offenderI)[:5]
+            offendingBill = str(offenderI)[-5:]
+            print(f"Bank: caught double spending from account {offender} on bill {offendingBill}")
+            return False
+        else:
+            # deposit the bill to merchant:
+            bill['account'] = merchNum
+            # save chunkinfos:
+            bill['chunks'] = chunkinfos
+            print(f"Bank: Deposit the bill to account {merchNum}")
+
+        return True
 
 
+    # Check for double spending by comparing to previously saved bill info
+    def checkDoubleSpending(self, bill, chunkinfos):
+        if 'chunks' not in bill:
+            return False, None
+        
+        for i in range(len(chunkinfos)):
+            billchunki = bill['chunks'][i]
+            revealbit = chunkinfos[i][0]
+            a_or_aXorI = int(chunkinfos[i][1])
+            aXorI_or_a = int(billchunki[1])
+            if revealbit != billchunki[0]:
+                return True, (a_or_aXorI ^ aXorI_or_a)
+        
+        return False, None
 
 class Customer:
     def __init__(self, bank) -> None:
@@ -470,6 +559,7 @@ class Customer:
         }
 
     def sendBillToMerchant(self, merchant):
+        print('Customer: sending bill to merchant')
         reveal = merchant.whichChunksToReveal()
         bill = self.bills[0]
 
@@ -478,13 +568,15 @@ class Customer:
         for i in range(self.bank.k):
             chunki = bill['chunks'][i]
             if reveal[i] == '1':
-                print('1', chunki['a'], chunki['c'], chunki['y'], file=merch_verify)
+                print('1', chunki['a'], chunki['c'], chunki['y'], chunki['r'], file=merch_verify)
             elif reveal[i] == '0':
-                print('0', chunki['aXorI'], chunki['d'], chunki['x'], file=merch_verify)
+                print('0', chunki['aXorI'], chunki['d'], chunki['x'], chunki['r'], file=merch_verify)
         merch_verify.close()
 
         # inform merchant to proceed
-        merchant.verify('merch_verify.txt')
+        valid = merchant.verifyAndDeposit('merch_verify.txt')
+
+
 
 class Merchant:
     def __init__(self, bank) -> None:
@@ -502,15 +594,12 @@ class Merchant:
         print(f'Merchant: reveal {reveal}')
         return reveal
 
-    def verify(self, merch_verify='merch_verify.txt', signed='signed.txt'):
+    def verifyAndDeposit(self, merch_verify='merch_verify.txt', signed='signed.txt'):
         # read the merch_verify info
+        print('Merchant: verify the bill')
         verify_info = []
         with open(merch_verify) as f:
             for line in f:
-                # revealbit, a_or_a1, c_or_d, y_or_x = line.strip().split()
-                # a_or_a1 = int(a_or_a1)
-                # c_or_d = int(c_or_d)
-                # y_or_x = int(y_or_x)
                 verify_info.append(line.strip().split())
         assert len(verify_info) == self.bank.k
         
@@ -521,8 +610,31 @@ class Merchant:
                 signatures.append(int(line.strip()))
         assert len(signatures) == self.bank.k
 
-        # for i in range(self.bank.k):
+        for i in range(self.bank.k):
+            valid = self.bank.reveal1chunk(verify_info[i], signatures[i])
+            if not valid:
+                print('Merchant: chunk verification failed')
+                return False
+        
+        # all chunks are verified, start to deposit to bank
+        self.deposit(verify_info, signatures, 'deposit.txt')
 
+        return True
+
+
+
+    def deposit(self, chunkinfos, signatures, depositfile='deposit.txt'):
+        print('Merchant: deposit to bank')
+        # inform bank to verify and deposit
+        # deposit.txt includes all the chunk info Merchant received, and signature
+        with open(depositfile, 'w') as f:
+            for i in range(self.bank.k):
+                # print(chunkinfos[i][0], chunkinfos[i][1], signatures[i], file=f)
+                print(*chunkinfos[i], signatures[i], file=f)
+
+        self.bank.depositMerchant(self.acctNum, depositfile='deposit.txt')
+        
+        
 
 
 
@@ -539,6 +651,7 @@ def Problem6Part6():
     alice = Customer(bank)
     alice.generateBill()
     bob = Merchant(bank)
+    alice.sendBillToMerchant(bob)
     alice.sendBillToMerchant(bob)
 
 if __name__ == '__main__':
