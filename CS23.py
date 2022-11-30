@@ -228,8 +228,10 @@ def Problem5Part4():
     print (f"verify: m = {message}, m1 = {m1}")
     assert m1 == message
 
+###
+### Problem 6
+###
 
-### For Problem 6
 def HashFunction(x, y):
     # Make sure the inputs are between 0 and 2**32-1
     assert 0 <= x <= 0xFFFFFFFF
@@ -277,6 +279,7 @@ class Bank:
         # bills keeps all the bills and the owner, it stores in the format of
         #   {'account': account, 'signature': signatures}
         self.bills = [] 
+        self.next_signed = 0
 
     # Create an account with 5-digit id, and save to accounts list
     def createAccount(self):
@@ -330,6 +333,7 @@ class Bank:
     # check the chunks of a bill
     # Return false if any chunk doesn't match
     def verifyAndSignChunks(self, customerNum, bank_verify_file='bank_verify.txt', tosign='to_sign.txt'):
+        print(f"Bank: verifying unblinded list from {bank_verify_file}")
         thebill = self.nextBillNumber - 1 # because it's already incremented
         theI = int(f"{customerNum:05d}{thebill:05d}")
 
@@ -362,21 +366,23 @@ class Bank:
             j += 1
 
         # verified, sign the k chunks and save to signed.txt
-        signedfile = open('signed.txt', 'w')
+        signedfile = f"signed-{self.next_signed}.txt"
+        self.next_signed += 1   # make sure it's unique signature file
+        signedf = open(signedfile, 'w')
         sbs = []
         for i in range(len(self.unblindIt)):
             if self.unblindIt[i] == True:   # don't need k1 chunks
                 continue
             sb = self.createSignature(allchunks_fb[i])
             sbs.append(sb)
-            print(sb, file=signedfile)
-        signedfile.close()
+            print(sb, file=signedf)
+        signedf.close()
 
         # save the bill with customer
         self.bills.append({'account': customerNum, 'signatures': sbs})
 
         print(f"Bank: bill {thebill} successfully verified {self.k1} chunks")
-        return True
+        return signedfile
 
     # Verify each chunk based on the reveal bit, which is first char in chunkinfo
     def reveal1chunk(self, chunkinfo, sig):
@@ -400,16 +406,9 @@ class Bank:
             return self.verifySignature(fb, sig)
 
 
-
-    # Customer request to sign a bill
-    # chunks include k+k1 chunks
-    # randomly get k1 chunks to unblind
-    # then sign
-    def signBill(self, customer, to_sign_file):
-        pass
-
     # return a list of k+k1 where k1 chunks are to be unblinded
     def requestK1Unblind(self):
+        print(f"Bank: randomly creating {self.k1} for customer to unblind ")
         # randomly pick k1 
         unblindIt = [False] * (self.k+self.k1)
         more = self.k1 # need more to unblind
@@ -466,7 +465,7 @@ class Bank:
             bill['account'] = merchNum
             # save chunkinfos:
             bill['chunks'] = chunkinfos
-            print(f"Bank: Deposit the bill to account {merchNum}")
+            print(f"Bank: Deposit the bill to account {merchNum} successfully")
 
         return True
 
@@ -490,13 +489,16 @@ class Customer:
     def __init__(self, bank) -> None:
         self.bank = bank
         self.acctNum = bank.createAccount()
-        self.bills = []
+        self.bills = [] # format: {billn, chunks, signedfile}
         print(f"Customer {self.acctNum} is created")
 
 
     def generateBill(self):
+        print(f"Customer {self.acctNum} is generating a bill")
         billn = self.bank.createBill()
+
         # prepare for k+k1 chunks for bank to check and sign
+        print(f"Customer {self.acctNum} bill {billn} preparing for chunks and saving to to_sign.txt")
         unsigned_chunks = []
         tosign = open('to_sign.txt', 'w')
         for i in range(self.bank.k + self.bank.k1):
@@ -510,6 +512,7 @@ class Customer:
         unblindIt = self.bank.requestK1Unblind()
 
         # write the k1 chunks to file bank_verify.txt
+        print(f"Customer {self.acctNum} unblind chunks in bank_verify.txt based on bank's unblind list")
         bank_verify = open('bank_verify.txt', 'w')
         for i in range(len(unblindIt)):
             if unblindIt[i] == True:
@@ -518,8 +521,8 @@ class Customer:
         bank_verify.close()
 
         # call bank to verify k1 chunks
-        valid = self.bank.verifyAndSignChunks(self.acctNum, 'bank_verify.txt')
-        if valid:
+        signedfile = self.bank.verifyAndSignChunks(self.acctNum, 'bank_verify.txt')
+        if signedfile:
             # delete k1 chunks
             for i in range(len(unblindIt)):
                 j = len(unblindIt) - i - 1  # reverse order
@@ -528,10 +531,12 @@ class Customer:
             assert len(unsigned_chunks) == self.bank.k
         else:
             print(f"Customer: the bill {billn} didn't pass the bank verification")
+            return -1
 
         # 
-        self.bills.append({"billn": billn, 'chunks': unsigned_chunks})
-        print(f"Bill {billn} is generated")
+        self.bills.append({"billn": billn, 'chunks': unsigned_chunks, 'signedfile': signedfile})
+        print(f"Bank: Bill {billn} is generated and signed")
+        return billn
 
     # Prepare a chunk for the bill
     # return (a, aXorI, c, d, x, y, fi) as dict
@@ -558,10 +563,17 @@ class Customer:
             'r': r
         }
 
-    def sendBillToMerchant(self, merchant):
-        print('Customer: sending bill to merchant')
+    def sendBillToMerchant(self, merchant, billn=-1):
+        print(f'Customer: sending bill {billn} to merchant')
         reveal = merchant.whichChunksToReveal()
-        bill = self.bills[0]
+
+        # find the bill by billn
+        if billn == -1:
+            bill = self.bills[0]
+        else:
+            for bill in self.bills:
+                if bill['billn'] == billn:
+                    break
 
         # write to merch_verify.txt
         merch_verify = open('merch_verify.txt', 'w')
@@ -572,9 +584,10 @@ class Customer:
             elif reveal[i] == '0':
                 print('0', chunki['aXorI'], chunki['d'], chunki['x'], chunki['r'], file=merch_verify)
         merch_verify.close()
+        print(f"Customer: save reveal chunk info to merch_verify.txt")
 
         # inform merchant to proceed
-        valid = merchant.verifyAndDeposit('merch_verify.txt')
+        valid = merchant.verifyAndDeposit('merch_verify.txt', signed=bill['signedfile'])
 
 
 
@@ -624,7 +637,7 @@ class Merchant:
 
 
     def deposit(self, chunkinfos, signatures, depositfile='deposit.txt'):
-        print('Merchant: deposit to bank')
+        print('Merchant: request deposit to bank')
         # inform bank to verify and deposit
         # deposit.txt includes all the chunk info Merchant received, and signature
         with open(depositfile, 'w') as f:
@@ -632,12 +645,12 @@ class Merchant:
                 # print(chunkinfos[i][0], chunkinfos[i][1], signatures[i], file=f)
                 print(*chunkinfos[i], signatures[i], file=f)
 
-        self.bank.depositMerchant(self.acctNum, depositfile='deposit.txt')
+        success = self.bank.depositMerchant(self.acctNum, depositfile='deposit.txt')
+        if not success:
+            print("Merchant: deposit request was declined by bank")
+        else:
+            self.bills.append({'chunks':chunkinfos, 'signatures': signatures})
         
-        
-
-
-
 
 def test_signature(bank):
     s = bank.createSignature(1234)
@@ -649,10 +662,27 @@ def Problem6Part6():
     bank = Bank()
     # test_signature(bank)
     alice = Customer(bank)
-    alice.generateBill()
     bob = Merchant(bank)
-    alice.sendBillToMerchant(bob)
-    alice.sendBillToMerchant(bob)
+
+    bill1 = alice.generateBill()
+    bill2 = alice.generateBill()
+    alice.sendBillToMerchant(bob, bill1)   # first time is valid
+    alice.sendBillToMerchant(bob, bill1)   # double spend
+    alice.sendBillToMerchant(bob, bill2)   # first time is valid
+    alice.sendBillToMerchant(bob, bill2)   # double spend
+
+
+# problem 6 part 6 in menu format
+def Problem6Part6_Menu():
+    print("\nMIT PRIMES CS 2023 Problem 6 Part 6:")
+    bank = Bank()
+    # test_signature(bank)
+    alice = Customer(bank)
+    bob = Merchant(bank)
+
+    alice.generateBill()
+    alice.sendBillToMerchant(bob)   # first time is valid
+    alice.sendBillToMerchant(bob)   # double spend
 
 if __name__ == '__main__':
     Problem1Part6()
@@ -663,3 +693,4 @@ if __name__ == '__main__':
     Problem5Part4()
     # test_HashFunction()
     Problem6Part6()
+    # Problem6Part6_Menu()
